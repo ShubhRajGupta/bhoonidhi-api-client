@@ -6,6 +6,12 @@ Distinguishes live verification results from offline mocked tests.
 """
 
 import sys
+from pathlib import Path
+
+# Support running directly as script (python bhoonidhi/verify_live_api.py) or as module
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from bhoonidhi.client import BhoonidhiClient
 from bhoonidhi.credentials import BhoonidhiCredentials
 
@@ -27,7 +33,7 @@ def run_live_verification():
         print("\nTo test with the live Bhoonidhi server:")
         print("    1. Open .env")
         print("    2. Set BHOONIDHI_USER_ID and BHOONIDHI_PASSWORD")
-        print("    3. Re-run: python verify_live_api.py")
+        print("    3. Re-run: python -m bhoonidhi.verify_live_api")
         sys.exit(0)
 
     # 2. Live Authentication

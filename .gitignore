@@ -9,6 +9,10 @@ downloads/
 data/
 *.part
 
+# Antigravity agent skills and skillpacks (Excluded from public repo)
+.agents/
+bhoonidhi-antigravity-skillpack/
+
 # Python cache and byte-compiled files
 __pycache__/
 *.py[cod]

@@ -6,7 +6,36 @@
 
 A robust, production-grade Python integration and data harvesting engine for the **ISRO National Remote Sensing Centre (NRSC) Bhoonidhi Open Data API** ([`bhoonidhi-api.nrsc.gov.in`](https://bhoonidhi-api.nrsc.gov.in)).
 
-Engineered to trace authentication lifecycles, safely navigate STAC catalogue search and pagination, stream large products atomically within strict concurrency quotas ($\le 5$ workers), and harvest daily browse/preview images alongside structured metadata.
+Engineered to manage authentication lifecycles, safely navigate STAC catalogue search and pagination, stream large products atomically within strict concurrency quotas ($\le 5$ workers), and harvest daily browse/preview images alongside structured metadata.
+
+---
+
+## Repository Structure
+
+All core library modules, executable runners, and unit tests are organized inside the `bhoonidhi/` package folder:
+
+```text
+├── bhoonidhi/                # Core package folder
+│   ├── __init__.py           # Package exports & public API
+│   ├── __main__.py           # Package CLI entrypoint (python -m bhoonidhi)
+│   ├── client.py             # High-level BhoonidhiClient facade
+│   ├── auth.py               # Token acquisition, caching, rotation, and lifecycle
+│   ├── search.py             # STAC search, BBox/CQL2 validation, anti-SSRF pagination
+│   ├── download.py           # Atomic streamed product downloads & concurrency pool
+│   ├── preview_fetcher.py    # JPEG browse harvester, IST windowing & image validation
+│   ├── product_mapping.py    # Alias normalization & canonical collection mapping
+│   ├── credentials.py        # Secure .env credential loader, string masking & CLI check
+│   ├── config.py             # Concurrency ceilings, timeouts, and rate limits
+│   ├── exceptions.py         # Dual error-schema parser and domain exception tree
+│   ├── fetch_previews.py     # Daily preview & metadata harvester runner
+│   ├── verify_live_api.py    # Non-destructive live verification against Bhoonidhi API
+│   └── tests/                # 50 unit and regression tests (100% mocked offline)
+├── requirements.txt          # Minimal dependencies (requests, Pillow)
+├── README.md                 # Complete documentation
+├── LICENSE                   # MIT License
+├── .env.example              # Configuration template
+└── .gitignore                # Excludes credentials, data, downloads & logs
+```
 
 ---
 
@@ -20,7 +49,7 @@ Engineered to trace authentication lifecycles, safely navigate STAC catalogue se
 
 - **STAC Search & Filter Engine**
   - Supports ISO 8601 / RFC 3339 datetime intervals and spatial filters (BBox `[west, south, east, north]` and GeoJSON Polygons).
-  - CQL2-JSON filter support (e.g. `Online = 'Y'`).
+  - CQL2-JSON filter support (e.g. `Online = 'Y'`, and filtering by Bhoonidhi catalogue upload date `updated`).
   - **Upstream Crash Prevention**: Workaround for Bhoonidhi APISIX/Java upstream 500 bugs by stripping server-injected `fields` filters when replaying `rel=next` pagination links.
   - **Anti-SSRF Protection**: Validates all pagination URLs against trusted host boundaries before forwarding bearer credentials.
   - Gracefully interprets Bhoonidhi's specific `404 NO RESULTS FOUND` responses as valid empty STAC feature collections.
@@ -36,35 +65,11 @@ Engineered to trace authentication lifecycles, safely navigate STAC catalogue se
   - Cleans up incomplete or corrupted files immediately upon network interruption or integrity mismatch.
   - Restricts worker pool concurrency to $\le 5$ per user/IP, honoring HTTP 412/429 concurrency and rate-limit backoffs.
 
-- **Daily Preview & Metadata Harvester (`fetch_previews.py`)**
+- **Daily Preview & Metadata Harvester**
   - Converts calendar days in `Asia/Kolkata` (IST, UTC+05:30) to RFC 3339 UTC intervals.
   - Discovers and downloads genuine JPEG/PNG browse/thumbnail assets (rejecting heavy scientific `.zip` or `.tif` files).
   - Validates image raster bytes via magic bytes and PIL before saving.
   - Automatically exports `metadata.json`, `metadata.csv`, and `manifest.json`.
-
----
-
-## Architecture Overview
-
-```text
-├── bhoonidhi/
-│   ├── __init__.py           # Package exports
-│   ├── auth.py               # Token acquisition, caching, rotation, and lifecycle
-│   ├── client.py             # High-level BhoonidhiClient facade
-│   ├── config.py             # Concurrency ceilings, timeouts, and rate limits
-│   ├── credentials.py        # Secure .env credential loader and string masking
-│   ├── download.py           # Atomic streamed product downloads & concurrency pool
-│   ├── exceptions.py         # Dual error-schema parser and domain exception tree
-│   ├── preview_fetcher.py    # JPEG browse harvester, IST windowing & image validation
-│   ├── product_mapping.py    # Alias normalization & canonical collection mapping
-│   └── search.py             # STAC search, BBox/CQL2 validation, anti-SSRF pagination
-├── tests/                    # 50 unit and regression tests (100% mocked offline)
-├── credentials.py            # CLI verification tool for local credentials
-├── fetch_previews.py         # CLI harvester for daily preview images & metadata
-├── verify_live_api.py        # Non-destructive live verification against Bhoonidhi API
-├── requirements.txt
-└── .env.example
-```
 
 ---
 
@@ -98,7 +103,7 @@ pip install -r requirements.txt
 ```
 
 ### 3. Configure credentials
-Copy `.env.example` to `.env` and provide your registered Bhoonidhi account details:
+Copy `.env.example` to `.env` and enter your registered Bhoonidhi account details:
 ```bash
 cp .env.example .env
 ```
@@ -117,7 +122,7 @@ BHOONIDHI_REQUEST_TIMEOUT=60
 
 Verify credentials locally without leaking:
 ```bash
-python credentials.py
+python bhoonidhi/credentials.py
 ```
 
 ---
@@ -148,26 +153,26 @@ search_result = client.search(
 )
 print(f"Found {search_result.total_returned} features across {search_result.pages_retrieved} pages.")
 
-# 3. Stream product download (with atomic .part staging and integrity verification)
+# 3. Stream product download (atomic .part staging, integrity check, max 5 concurrency)
 if search_result.features:
     item = search_result.features[0]
     dl_res = client.download_feature(item, output_dir="./downloads")
     print(f"Download status: {dl_res.status}, path: {dl_res.file_path}")
 ```
 
-### 2. Daily Preview Harvester CLI (`fetch_previews.py`)
+### 2. Daily Preview Harvester CLI
 
 Fetches all scenes for a given local calendar day in India (`Asia/Kolkata`), downloads validated small JPEG thumbnails, and generates metadata files:
 
 ```bash
-# Harvest ResourceSat-2 AWIFS for 29 October 2026
-python fetch_previews.py --date 2026-10-29 --collection ResourceSat-2_AWIFS_L2
+# Run via python module (recommended)
+python -m bhoonidhi --date 2026-10-29 --collection ResourceSat-2_AWIFS_L2
 
-# Harvest EOS-04 SAR FRS2 for 29 October 2026
-python fetch_previews.py --date 2026-10-29 --collection EOS-04_SAR-FRS2_L2A
+# Or directly through fetch_previews script
+python bhoonidhi/fetch_previews.py --date 2026-10-29 --collection EOS-04_SAR-FRS2_L2A
 
-# Harvest Sentinel-1A SAR for 29 June 2026
-python fetch_previews.py --date 2026-06-29 --collection Sentinel-1A_SAR-IW_GRD
+# Querying Sentinel-1A SAR for an indexed historical date (e.g. 29 June 2026)
+python -m bhoonidhi --date 2026-06-29 --collection Sentinel-1A_SAR-IW_GRD
 ```
 
 Output directory layout:
@@ -181,11 +186,11 @@ data/YYYY-MM-DD/<collection_id>/
 └── manifest.json       # Job statistics, timestamps, and data volume summary
 ```
 
-### 3. Non-Destructive Live API Verification (`verify_live_api.py`)
+### 3. Non-Destructive Live API Verification
 
 Performs a live end-to-end check of authentication, collection discovery, and a non-destructive search:
 ```bash
-python verify_live_api.py
+python bhoonidhi/verify_live_api.py
 ```
 
 ---
@@ -195,11 +200,11 @@ python verify_live_api.py
 All core functionality is covered by 50 offline unit tests using mocks and sanitized JSON fixtures (no live credentials or network connection required):
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -v
+python -m unittest discover -s bhoonidhi/tests -p "test_*.py" -v
 ```
 
 ```text
-Ran 50 tests in 0.185s
+Ran 50 tests in 0.144s
 OK
 ```
 

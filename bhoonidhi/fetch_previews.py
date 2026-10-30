@@ -9,6 +9,10 @@ import json
 import sys
 from pathlib import Path
 
+# Support running directly as script (python bhoonidhi/fetch_previews.py) or as module
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from bhoonidhi.client import BhoonidhiClient
 from bhoonidhi.preview_fetcher import PreviewFetcher, get_kolkata_day_window
 
@@ -111,4 +115,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
