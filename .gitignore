@@ -1,0 +1,20 @@
+# Credentials and Environment Variables (Strictly excluded)
+.env
+.env.local
+.env.*.local
+tokens.json
+
+# Local downloads and data artifacts
+downloads/
+data/
+*.part
+
+# Python cache and byte-compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Logs
+*.log
