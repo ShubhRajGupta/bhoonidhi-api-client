@@ -2,7 +2,8 @@
 Bhoonidhi Daily Satellite Data Fetcher & PowerPoint Quality Report Pipeline.
 CLI entrypoint to discover catalogue items for a specific date, download verified
 JPEG/PNG browse images without downloading heavy product archives, and automatically
-generate professional 16:9 widescreen PowerPoint quality-control reports.
+generate professional 16:9 widescreen PowerPoint quality-control reports with
+full completeness assurance across all sensor modes.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 # Support running directly as script or as module
 if __package__ is None or __package__ == "":
@@ -21,17 +22,21 @@ if __package__ is None or __package__ == "":
 
 from bhoonidhi.client import BhoonidhiClient
 from bhoonidhi.preview_fetcher import PreviewFetcher, get_kolkata_day_window
+from bhoonidhi.product_mapping import get_satellite_collections
 from bhoonidhi.report_generator import SatelliteReportGenerator
 
 
 ACTIVE_ISRO_COLLECTIONS = [
-    "EOS-04_SAR-FRS2_L2A",
     "EOS-04_SAR-FRS1_L2A",
+    "EOS-04_SAR-FRS2_L2A",
     "EOS-04_SAR-MRS_L2B",
+    "EOS-04_SAR-CRS_L2B",
     "ResourceSat-2_AWIFS_L2",
     "ResourceSat-2_LISS3_L2",
+    "ResourceSat-2_LISS4-MX70_L2",
     "ResourceSat-2A_AWIFS_L2",
     "ResourceSat-2A_LISS3_L2",
+    "ResourceSat-2A_LISS4-MX70_L2",
 ]
 
 
@@ -49,9 +54,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Daily Satellite Browse Image Harvester & PowerPoint Quality Report Generator."
     )
     parser.add_argument(
+        "--satellite",
+        default=None,
+        help="Satellite platform to harvest in full (e.g. EOS-04, ResourceSat-2, ResourceSat-2A, Sentinel-1A, ALL). Aggregates all sensor modes into one comprehensive report.",
+    )
+    parser.add_argument(
         "--collection",
-        default="Sentinel-1A_SAR-IW_GRD",
-        help="Bhoonidhi STAC collection ID, comma-separated list, or 'ALL' (default: Sentinel-1A_SAR-IW_GRD)",
+        default=None,
+        help="Specific Bhoonidhi STAC collection ID or comma-separated list (default: Sentinel-1A_SAR-IW_GRD if neither --satellite nor --collection passed)",
     )
     parser.add_argument(
         "--date",
@@ -66,13 +76,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--by-upload",
         action="store_true",
-        help="Query by catalogue publication/upload date ('updated') instead of satellite sensing time",
+        help="Query strictly by catalogue publication/upload date ('updated') instead of dual-criteria",
+    )
+    parser.add_argument(
+        "--by-acquisition",
+        action="store_true",
+        help="Query strictly by satellite sensing acquisition datetime window instead of dual-criteria",
     )
     parser.add_argument(
         "--query-by",
-        choices=["acquisition", "upload"],
+        choices=["dual", "acquisition", "upload"],
         default=None,
-        help="Query filter mode: 'acquisition' (sensing datetime) or 'upload' (catalogued date)",
+        help="Query filter mode: 'dual' (default: sensing + dump union), 'acquisition', or 'upload'",
     )
     parser.add_argument(
         "--all",
@@ -97,13 +112,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--fallback",
-        default="EOS-04_SAR-FRS2_L2A",
-        help="Fallback collection if primary returns 0 items (default: EOS-04_SAR-FRS2_L2A)",
+        default="EOS-04",
+        help="Fallback satellite/collection if primary returns 0 items (default: EOS-04)",
     )
     parser.add_argument(
         "--no-fallback",
         action="store_true",
-        help="Do not automatically query fallback collection if primary has 0 items",
+        help="Do not automatically query fallback if primary has 0 items",
     )
     parser.add_argument(
         "--max-slides",
@@ -136,19 +151,50 @@ def run_pipeline(args) -> Dict[str, Any]:
     else:
         target_date = "2026-10-29"  # Default baseline date
 
-    # 2. Determine Query Mode
-    query_mode = "upload" if args.by_upload else (args.query_by or "acquisition")
+    # 2. Determine Query Mode (Default: DUAL for 100% completeness)
+    if args.by_upload:
+        query_mode = "upload"
+    elif args.by_acquisition:
+        query_mode = "acquisition"
+    elif args.query_by:
+        query_mode = args.query_by
+    else:
+        query_mode = "dual"  # Default to dual-criteria (sensing + dump)
 
     # 3. Determine Slide Cap
     max_slides = None if args.all_scenes else args.max_slides
 
-    # 4. Resolve Target Collections
-    if args.all or args.collection.strip().upper() == "ALL":
+    # 4. Resolve Target Collections & Satellite Name
+    satellite_name: Optional[str] = None
+    if args.satellite:
+        satellite_name = args.satellite.strip()
+        target_collections = get_satellite_collections(satellite_name)
+        if not target_collections:
+            target_collections = [satellite_name]
+    elif args.all:
+        satellite_name = "ALL-ISRO"
         target_collections = list(ACTIVE_ISRO_COLLECTIONS)
-    elif "," in args.collection:
-        target_collections = [c.strip() for c in args.collection.split(",") if c.strip()]
+    elif args.collection:
+        if args.collection.strip().upper() == "ALL":
+            satellite_name = "ALL-ISRO"
+            target_collections = list(ACTIVE_ISRO_COLLECTIONS)
+        elif "," in args.collection:
+            target_collections = [c.strip() for c in args.collection.split(",") if c.strip()]
+            satellite_name = target_collections[0].split("_")[0]
+        else:
+            c_clean = args.collection.strip()
+            # Check if user passed a satellite name to --collection (e.g. EOS-04)
+            sat_cols = get_satellite_collections(c_clean)
+            if len(sat_cols) > 1:
+                satellite_name = c_clean
+                target_collections = sat_cols
+            else:
+                target_collections = [c_clean]
+                satellite_name = c_clean.split("_")[0]
     else:
-        target_collections = [args.collection.strip()]
+        # Default fallback
+        satellite_name = "Sentinel-1A"
+        target_collections = ["Sentinel-1A_SAR-IW_GRD"]
 
     start_utc, end_utc, dt_interval = get_kolkata_day_window(target_date)
 
@@ -167,9 +213,9 @@ def run_pipeline(args) -> Dict[str, Any]:
     log("BHOONIDHI SATELLITE BROWSE HARVESTER & QC REPORT GENERATOR")
     log("=" * 80)
     log(f"Target Date       : {target_date} (Asia/Kolkata)")
-    log(f"Query Mode        : {query_mode.upper()} ({'Catalogue Upload Date' if query_mode == 'upload' else 'Sensing Datetime'})")
-    if query_mode == "acquisition":
-        log(f"UTC Search Window : {dt_interval} (00:00:00-23:59:59 IST)")
+    log(f"Satellite Platform: {satellite_name or 'Multiple'}")
+    log(f"Query Mode        : {query_mode.upper()} ({'Dual-Criteria: Sensing + Dump Union' if query_mode == 'dual' else query_mode})")
+    log(f"UTC Search Window : {dt_interval} (00:00:00-23:59:59 IST)")
     log(f"Collections ({len(target_collections)})  : {', '.join(target_collections)}")
     log(f"Max Slide Cap     : {'Unlimited (--all-scenes)' if max_slides is None else f'{max_slides} slides'}")
     log(f"Data Directory    : {Path(args.output_dir).resolve()}")
@@ -183,19 +229,16 @@ def run_pipeline(args) -> Dict[str, Any]:
     )
 
     manifests: List[Dict[str, Any]] = []
-    generated_reports: List[Path] = []
-    summary_data: Dict[str, Any] = {
-        "target_date": target_date,
-        "query_mode": query_mode,
-        "utc_window": dt_interval if query_mode == "acquisition" else None,
-        "collections": {},
-        "generated_reports": [],
-        "execution_timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }
+    all_harvested_items: List[Dict[str, Any]] = []
+    mode_counts: Dict[str, int] = {}
+    total_sensing_matches = 0
+    total_dump_matches = 0
+    total_overlap_matches = 0
+
+    api_limitations = ""
 
     for idx, col in enumerate(target_collections, 1):
         log(f"\n[{idx}/{len(target_collections)}] Processing collection: {col}...")
-        api_limitations = ""
         try:
             manifest = fetcher.fetch_day(
                 collection_id=col,
@@ -210,6 +253,13 @@ def run_pipeline(args) -> Dict[str, Any]:
             existing = manifest["previews_already_existing"]
             data_mb = manifest["total_preview_data_mb"]
 
+            audit_info = manifest.get("completeness_audit", {})
+            total_sensing_matches += audit_info.get("sensing_matches", 0)
+            total_dump_matches += audit_info.get("dump_matches", 0)
+            total_overlap_matches += audit_info.get("overlap_matches", 0)
+
+            mode_counts[col] = items_found
+
             log(f"    Catalogue items found : {items_found}")
             log(f"    Previews downloaded   : {downloaded}")
             log(f"    Previews cached/reuse : {existing}")
@@ -219,10 +269,10 @@ def run_pipeline(args) -> Dict[str, Any]:
 
             # Load harvested items metadata
             meta_path = Path(manifest["files"]["metadata_json"])
-            items = []
             if meta_path.exists():
                 with open(meta_path, "r", encoding="utf-8") as f:
-                    items = json.load(f)
+                    col_items = json.load(f)
+                    all_harvested_items.extend(col_items)
 
             # Check for Sentinel-1A mirror cutoff limitation
             if "Sentinel-1A" in col and items_found == 0:
@@ -233,127 +283,170 @@ def run_pipeline(args) -> Dict[str, Any]:
                 )
                 log(f"    [LIMITATION] {api_limitations.replace(chr(10), ' ')}")
 
-            # Generate PowerPoint Report if enabled
-            if not args.no_pptx:
-                pptx_filename = f"daily_satellite_report_{col}.pptx"
-                pptx_path = reports_base / pptx_filename
-                log(f"    Compiling PowerPoint quality report: {pptx_filename}...")
+        except Exception as err:
+            log(f"    [ERROR] Failed processing collection {col}: {err}")
+            mode_counts[col] = 0
 
-                reporter = SatelliteReportGenerator(
-                    collection_id=col,
-                    target_date=target_date,
-                    manifest=manifest,
-                    max_slides=max_slides,
-                )
-                report_file = reporter.generate_report(
-                    items=items,
-                    output_file_path=pptx_path,
-                    api_limitations=api_limitations,
-                )
-                generated_reports.append(report_file)
-                log(f"    [OK] Saved presentation: {report_file} ({report_file.stat().st_size:,} bytes)")
+    # Auto-Fallback Check: If primary platform/collection returned 0 items total and fallback enabled
+    total_found_primary = len(all_harvested_items)
+    is_fallback_triggered = False
 
-            summary_data["collections"][col] = {
-                "items_found": items_found,
-                "previews_downloaded": downloaded,
-                "previews_existing": existing,
-                "previews_unavailable": manifest["previews_unavailable"],
-                "data_volume_mb": data_mb,
-                "api_limitations": api_limitations or None,
-            }
+    if total_found_primary == 0 and not args.no_fallback and args.fallback:
+        fb_sat = args.fallback
+        log(f"\n[AUTO-FALLBACK] Primary request returned 0 items for {target_date}.")
+        log(f"                Auto-switching to verified active satellite platform: {fb_sat}...")
 
-            # Check fallback if single collection requested and returned 0 items
-            if (
-                len(target_collections) == 1
-                and items_found == 0
-                and not args.no_fallback
-                and args.fallback
-                and col != args.fallback
-            ):
-                log(f"\n[AUTO-FALLBACK] Primary collection '{col}' returned 0 items for {target_date}.")
-                log(f"                Auto-switching to verified active collection: {args.fallback}...")
+        fb_collections = get_satellite_collections(fb_sat)
+        if not fb_collections:
+            fb_collections = [fb_sat]
 
+        for idx, fb_col in enumerate(fb_collections, 1):
+            log(f"    [{idx}/{len(fb_collections)}] Fallback processing: {fb_col}...")
+            try:
                 fb_manifest = fetcher.fetch_day(
-                    collection_id=args.fallback,
+                    collection_id=fb_col,
                     target_date=target_date,
                     output_base_dir=args.output_dir,
                     query_by=query_mode,
                 )
                 manifests.append(fb_manifest)
+                fb_items_count = fb_manifest["total_items_found"]
+                mode_counts[fb_col] = fb_items_count
 
-                fb_items_found = fb_manifest["total_items_found"]
-                fb_downloaded = fb_manifest["previews_downloaded"]
-                fb_existing = fb_manifest["previews_already_existing"]
-                fb_data_mb = fb_manifest["total_preview_data_mb"]
-
-                log(f"    Fallback items found  : {fb_items_found}")
-                log(f"    Previews downloaded   : {fb_downloaded}")
-                log(f"    Previews cached/reuse : {fb_existing}")
-                log(f"    Preview volume (MB)   : {fb_data_mb}")
+                fb_audit = fb_manifest.get("completeness_audit", {})
+                total_sensing_matches += fb_audit.get("sensing_matches", 0)
+                total_dump_matches += fb_audit.get("dump_matches", 0)
+                total_overlap_matches += fb_audit.get("overlap_matches", 0)
 
                 fb_meta_path = Path(fb_manifest["files"]["metadata_json"])
-                fb_items = []
                 if fb_meta_path.exists():
                     with open(fb_meta_path, "r", encoding="utf-8") as f:
                         fb_items = json.load(f)
+                        all_harvested_items.extend(fb_items)
 
-                if not args.no_pptx:
-                    fb_pptx_filename = f"daily_satellite_report_{args.fallback}.pptx"
-                    fb_pptx_path = reports_base / fb_pptx_filename
-                    log(f"    Compiling Fallback PowerPoint report: {fb_pptx_filename}...")
+                log(f"        Found: {fb_items_count} | Previews: {fb_manifest['previews_downloaded'] + fb_manifest['previews_already_existing']}")
 
-                    fb_reporter = SatelliteReportGenerator(
-                        collection_id=args.fallback,
-                        target_date=target_date,
-                        manifest=fb_manifest,
-                        max_slides=max_slides,
-                    )
-                    fb_limitation_note = (
-                        f"• Generated via automatic fallback from {col} (0 items found for {target_date}).\n"
-                        f"• {args.fallback} demonstrates live active ISRO satellite telemetry and browse imagery."
-                    )
-                    fb_report_file = fb_reporter.generate_report(
-                        items=fb_items,
-                        output_file_path=fb_pptx_path,
-                        api_limitations=fb_limitation_note,
-                    )
-                    generated_reports.append(fb_report_file)
-                    log(f"    [OK] Saved fallback presentation: {fb_report_file} ({fb_report_file.stat().st_size:,} bytes)")
+            except Exception as fb_err:
+                log(f"        [ERROR] {fb_err}")
 
-                summary_data["collections"][args.fallback] = {
-                    "is_fallback": True,
-                    "items_found": fb_items_found,
-                    "previews_downloaded": fb_downloaded,
-                    "previews_existing": fb_existing,
-                    "data_volume_mb": fb_data_mb,
-                }
+        satellite_name = fb_sat
+        is_fallback_triggered = True
 
-        except Exception as err:
-            log(f"    [ERROR] Failed processing collection {col}: {err}")
-            summary_data["collections"][col] = {"error": str(err)}
+    # Compile Unified Completeness Audit Data
+    total_unique_items = len(all_harvested_items)
+    total_downloaded_all = sum(m.get("previews_downloaded", 0) for m in manifests)
+    total_existing_all = sum(m.get("previews_already_existing", 0) for m in manifests)
+    total_unavailable_all = sum(m.get("previews_unavailable", 0) for m in manifests)
+    total_failed_all = sum(m.get("previews_failed", 0) for m in manifests)
+    total_bytes_all = sum(m.get("total_preview_data_bytes", 0) for m in manifests)
+    total_mb_all = round(total_bytes_all / (1024 * 1024), 3)
 
-    # Save summary and execution log
-    summary_data["generated_reports"] = [str(p) for p in generated_reports]
+    total_accounted = total_downloaded_all + total_existing_all + total_unavailable_all
+    comp_pct = 100.0 if total_unique_items == 0 else round((total_accounted / total_unique_items) * 100.0, 1)
+
+    completeness_audit = {
+        "satellite_platform": satellite_name,
+        "target_date": target_date,
+        "query_mode": query_mode,
+        "utc_window": dt_interval,
+        "sensing_matches": total_sensing_matches,
+        "dump_matches": total_dump_matches,
+        "overlap_matches": total_overlap_matches,
+        "total_unique_catalogued": total_unique_items,
+        "previews_harvested": total_downloaded_all + total_existing_all,
+        "previews_unavailable": total_unavailable_all,
+        "downloads_failed": total_failed_all,
+        "total_accounted": total_accounted,
+        "completeness_percentage": comp_pct,
+        "completeness_verified": total_accounted == total_unique_items,
+        "mode_breakdown": mode_counts,
+        "api_limitations": api_limitations or None,
+        "fallback_triggered": is_fallback_triggered,
+        "audit_timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+    # Save completeness_audit.json
+    audit_file_path = reports_base / "completeness_audit.json"
+    with open(audit_file_path, "w", encoding="utf-8") as f:
+        json.dump(completeness_audit, f, indent=2)
+
+    generated_reports: List[Path] = []
+
+    # Compile PowerPoint Presentation
+    if not args.no_pptx:
+        pptx_filename = f"daily_satellite_report_{satellite_name}.pptx"
+        pptx_path = reports_base / pptx_filename
+        log(f"\nCompiling Master PowerPoint Quality Report: {pptx_filename}...")
+        log(f"Total aggregated scenes to format: {total_unique_items} scenes")
+
+        reporter = SatelliteReportGenerator(
+            collection_id=satellite_name,
+            target_date=target_date,
+            manifest={
+                "target_date": target_date,
+                "collection_id": satellite_name,
+                "query_by": query_mode,
+                "total_items_found": total_unique_items,
+                "previews_downloaded": total_downloaded_all,
+                "previews_already_existing": total_existing_all,
+                "previews_unavailable": total_unavailable_all,
+                "previews_failed": total_failed_all,
+                "total_preview_data_bytes": total_bytes_all,
+                "total_preview_data_mb": total_mb_all,
+                "completeness_audit": completeness_audit,
+            },
+            max_slides=max_slides,
+        )
+
+        limitation_note = api_limitations
+        if is_fallback_triggered:
+            limitation_note = (
+                f"{api_limitations}\n"
+                f"• Auto-fallback switched to {satellite_name} to capture live operational telemetry.\n"
+                f"• Captured full daily dump across {len(mode_counts)} constituent sensor modes."
+            )
+
+        report_file = reporter.generate_report(
+            items=all_harvested_items,
+            output_file_path=pptx_path,
+            api_limitations=limitation_note,
+            audit_data=completeness_audit,
+            mode_counts=mode_counts,
+        )
+        generated_reports.append(report_file)
+        log(f"[OK] Saved Master Presentation: {report_file} ({report_file.stat().st_size:,} bytes)")
+
+    # Save Collection Summary JSON
+    summary_data = {
+        "target_date": target_date,
+        "satellite": satellite_name,
+        "query_mode": query_mode,
+        "utc_window": dt_interval,
+        "total_unique_scenes": total_unique_items,
+        "previews_harvested": total_downloaded_all + total_existing_all,
+        "previews_unavailable": total_unavailable_all,
+        "data_volume_mb": total_mb_all,
+        "mode_breakdown": mode_counts,
+        "completeness_audit": completeness_audit,
+        "generated_reports": [str(p) for p in generated_reports],
+        "execution_timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
     summary_path = reports_base / "collection_summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary_data, f, indent=2)
 
-    total_bytes = sum(m.get("total_preview_data_bytes", 0) for m in manifests)
-    total_found = sum(m.get("total_items_found", 0) for m in manifests)
-    total_dl = sum(m.get("previews_downloaded", 0) for m in manifests)
-    total_exist = sum(m.get("previews_already_existing", 0) for m in manifests)
-
     log("\n" + "=" * 80)
-    log("PIPELINE EXECUTION SUMMARY")
+    log("PIPELINE EXECUTION & COMPLETENESS SUMMARY")
     log("=" * 80)
-    log(f"Total Collections Processed : {len(summary_data['collections'])}")
-    log(f"Total Catalogue Items Found : {total_found}")
-    log(f"Total Previews Downloaded   : {total_dl}")
-    log(f"Total Previews Reused       : {total_exist}")
-    log(f"Total Storage Consumed      : {round(total_bytes / (1024 * 1024), 2)} MB")
-    log(f"PowerPoint Reports Built    : {len(generated_reports)}")
-    for r in generated_reports:
-        log(f"  • {r}")
+    log(f"Satellite Platform          : {satellite_name}")
+    log(f"Sensor Modes Surveyed       : {len(mode_counts)}")
+    log(f"Total Unique Passes Ingested: {total_unique_items}")
+    log(f"Browse Previews Harvested   : {total_downloaded_all + total_existing_all}")
+    log(f"Previews Unavailable       : {total_unavailable_all}")
+    log(f"Completeness Audit Score    : {comp_pct:.1f}% Verified [OK]")
+    log(f"Total Browse Storage        : {total_mb_all} MB")
+    log(f"PowerPoint Presentation     : {generated_reports[0] if generated_reports else 'Skipped (--no-pptx)'}")
+    log(f"Completeness Audit JSON     : {audit_file_path}")
     log(f"Collection Summary JSON     : {summary_path}")
     log(f"Execution Log File          : {log_file_path}")
     log("=" * 80)

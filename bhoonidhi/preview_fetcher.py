@@ -369,13 +369,15 @@ class PreviewFetcher:
         output_base_dir: Union[str, Path] = "data",
         limit_per_page: int = 100,
         max_pages: int = 50,
-        query_by: str = "acquisition",
+        query_by: str = "dual",
     ) -> Dict[str, Any]:
         """
         Main execution flow:
         1. Queries STAC search for target_date.
-           - If query_by == 'acquisition': filters by sensing datetime in Asia/Kolkata day window.
-           - If query_by == 'upload': filters by STAC catalogue upload date ('updated' property).
+           - If query_by == 'dual': runs Dual-Criteria search (sensing datetime window AND
+             catalogue dump/upload date) merging and deduplicating to ensure 100% completeness.
+           - If query_by == 'acquisition': filters only by sensing datetime in Asia/Kolkata day window.
+           - If query_by == 'upload': filters only by STAC catalogue upload date ('updated' property).
         2. Deduplicates items.
         3. Downloads preview images to data/YYYY-MM-DD/<collection_id>/previews/.
         4. Writes metadata.json, metadata.csv, and manifest.json.
@@ -386,7 +388,37 @@ class PreviewFetcher:
         previews_dir = target_dir / "previews"
         previews_dir.mkdir(parents=True, exist_ok=True)
 
-        if query_by == "upload":
+        acq_ids: Set[str] = set()
+        dump_ids: Set[str] = set()
+
+        if query_by in ("dual", "combined"):
+            logger.info(
+                "Fetching %s with Dual-Criteria Ingestion (Sensing + Dump) for date %s",
+                collection_id,
+                target_date,
+            )
+            # 1. Query by sensing window
+            res_acq = self.client.search(
+                collections=[collection_id],
+                datetime_range=dt_interval,
+                limit=limit_per_page,
+                online_only=False,
+                max_pages=max_pages,
+            )
+            # 2. Query by catalogue dump/updated date
+            extra_filter = {"op": "like", "args": [{"property": "updated"}, f"{target_date}%"]}
+            res_dump = self.client.search(
+                collections=[collection_id],
+                extra_filter=extra_filter,
+                limit=limit_per_page,
+                online_only=False,
+                max_pages=max_pages,
+            )
+            raw_features = res_acq.features + res_dump.features
+            acq_ids = set(f.get("id") for f in res_acq.features if f.get("id"))
+            dump_ids = set(f.get("id") for f in res_dump.features if f.get("id"))
+
+        elif query_by == "upload":
             logger.info(
                 "Fetching %s for upload date %s",
                 collection_id,
@@ -400,6 +432,8 @@ class PreviewFetcher:
                 online_only=False,
                 max_pages=max_pages,
             )
+            raw_features = search_result.features
+            dump_ids = set(f.get("id") for f in raw_features if f.get("id"))
         else:
             logger.info(
                 "Fetching %s for date %s (IST window: %s)",
@@ -414,11 +448,13 @@ class PreviewFetcher:
                 online_only=False,
                 max_pages=max_pages,
             )
+            raw_features = search_result.features
+            acq_ids = set(f.get("id") for f in raw_features if f.get("id"))
 
         # Deduplicate features by item ID
         unique_features: List[Dict[str, Any]] = []
         seen_ids: Set[str] = set()
-        for f in search_result.features:
+        for f in raw_features:
             fid = f.get("id")
             if fid and fid not in seen_ids:
                 seen_ids.add(fid)
@@ -493,15 +529,32 @@ class PreviewFetcher:
 
         # Write manifest.json
         total_mb = round(total_preview_bytes / (1024 * 1024), 3)
+        total_unique = len(unique_features)
+        total_accounted = downloaded_count + already_exists_count + unavailable_count
+        comp_pct = 100.0 if total_unique == 0 else round((total_accounted / total_unique) * 100.0, 1)
+
+        completeness_audit = {
+            "query_mode": query_by,
+            "sensing_matches": len(acq_ids),
+            "dump_matches": len(dump_ids),
+            "overlap_matches": len(acq_ids.intersection(dump_ids)) if (acq_ids and dump_ids) else 0,
+            "total_unique_catalogued": total_unique,
+            "previews_harvested": downloaded_count + already_exists_count,
+            "previews_unavailable": unavailable_count,
+            "total_accounted": total_accounted,
+            "completeness_percentage": comp_pct,
+            "completeness_verified": total_accounted == total_unique,
+        }
+
         manifest = {
             "target_date": target_date,
             "collection_id": collection_id,
             "query_by": query_by,
             "timezone": "Asia/Kolkata (UTC+05:30)",
-            "utc_window_start": start_utc if query_by == "acquisition" else None,
-            "utc_window_end": end_utc if query_by == "acquisition" else None,
-            "upload_date_prefix": target_date if query_by == "upload" else None,
-            "total_items_found": len(unique_features),
+            "utc_window_start": start_utc,
+            "utc_window_end": end_utc,
+            "upload_date_prefix": target_date,
+            "total_items_found": total_unique,
             "previews_downloaded": downloaded_count,
             "previews_already_existing": already_exists_count,
             "previews_unavailable": unavailable_count,
@@ -509,6 +562,7 @@ class PreviewFetcher:
             "previews_oversized": oversized_count,
             "total_preview_data_bytes": total_preview_bytes,
             "total_preview_data_mb": total_mb,
+            "completeness_audit": completeness_audit,
             "output_directory": str(target_dir),
             "files": {
                 "metadata_json": str(meta_json_path),

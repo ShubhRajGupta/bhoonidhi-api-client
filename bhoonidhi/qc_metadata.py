@@ -257,3 +257,4 @@ def extract_qc_metadata(item: Dict[str, Any]) -> QCMetadata:
         bbox=item.get("bbox"),
         raw_properties=raw,
     )
+

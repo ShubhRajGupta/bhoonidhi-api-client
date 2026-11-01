@@ -103,8 +103,8 @@ class TestReportGenerator(unittest.TestCase):
         self.assertAlmostEqual(width_in, 13.333, places=2)
         self.assertAlmostEqual(height_in, 7.5, places=2)
 
-        # Expected slides: 1 Cover + 1 Overview + 3 Product + 1 Summary = 6 slides
-        self.assertEqual(len(prs.slides), 6)
+        # Expected slides: 1 Cover + 1 Overview + 1 Completeness + 3 Product + 1 Summary = 7 slides
+        self.assertEqual(len(prs.slides), 7)
 
         # Slide 1: Cover Slide
         cover_texts = " ".join([shape.text_frame.text for shape in prs.slides[0].shapes if shape.has_text_frame])
@@ -115,20 +115,25 @@ class TestReportGenerator(unittest.TestCase):
         overview_tables = [s for s in prs.slides[1].shapes if s.has_table]
         self.assertEqual(len(overview_tables), 1)
 
-        # Slide 3: Product Slide 1 (With real image embedded)
-        prod1_pics = [s for s in prs.slides[2].shapes if s.shape_type == 13]
+        # Slide 3: Completeness Assurance Slide
+        completeness_texts = " ".join([shape.text_frame.text for shape in prs.slides[2].shapes if shape.has_text_frame])
+        self.assertIn("COMPLETENESS ASSURANCE & AUDIT", completeness_texts)
+        self.assertIn("COMPLETENESS VERIFIED", completeness_texts)
+
+        # Slide 4: Product Slide 1 (With real image embedded)
+        prod1_pics = [s for s in prs.slides[3].shapes if s.shape_type == 13]
         self.assertEqual(len(prod1_pics), 1)
-        prod1_tables = [s for s in prs.slides[2].shapes if s.has_table]
+        prod1_tables = [s for s in prs.slides[3].shapes if s.has_table]
         self.assertEqual(len(prod1_tables), 1)
 
-        # Slide 4: Product Slide 2 (Unavailable image placeholder)
-        prod2_pics = [s for s in prs.slides[3].shapes if s.shape_type == 13]
+        # Slide 5: Product Slide 2 (Unavailable image placeholder)
+        prod2_pics = [s for s in prs.slides[4].shapes if s.shape_type == 13]
         self.assertEqual(len(prod2_pics), 0)
-        prod2_texts = " ".join([shape.text_frame.text for shape in prs.slides[3].shapes if shape.has_text_frame])
+        prod2_texts = " ".join([shape.text_frame.text for shape in prs.slides[4].shapes if shape.has_text_frame])
         self.assertIn("PREVIEW UNAVAILABLE", prod2_texts)
 
-        # Slide 6: Summary Slide
-        summary_texts = " ".join([shape.text_frame.text for shape in prs.slides[5].shapes if shape.has_text_frame])
+        # Slide 7: Summary Slide
+        summary_texts = " ".join([shape.text_frame.text for shape in prs.slides[6].shapes if shape.has_text_frame])
         self.assertIn("QUALITY CONTROL & PIPELINE SUMMARY", summary_texts)
 
     def test_max_slides_capping(self):
@@ -143,9 +148,10 @@ class TestReportGenerator(unittest.TestCase):
         res_path = generator.generate_report(self.mock_items, out_file)
         prs = Presentation(str(res_path))
 
-        # Expected slides: 1 Cover + 1 Overview + 1 Product (capped) + 1 Summary = 4 slides
-        self.assertEqual(len(prs.slides), 4)
+        # Expected slides: 1 Cover + 1 Overview + 1 Completeness + 1 Product (capped) + 1 Summary = 5 slides
+        self.assertEqual(len(prs.slides), 5)
 
 
 if __name__ == "__main__":
     unittest.main()
+

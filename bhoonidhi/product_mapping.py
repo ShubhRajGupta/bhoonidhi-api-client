@@ -232,3 +232,94 @@ def resolve_product_types(
         mapping=mapping,
         suggestions=suggestions,
     )
+
+
+# Active ISRO and Partner Satellite Collections Groupings
+SATELLITE_COLLECTIONS: Dict[str, List[str]] = {
+    "EOS-04": [
+        "EOS-04_SAR-FRS1_L2A",
+        "EOS-04_SAR-FRS2_L2A",
+        "EOS-04_SAR-MRS_L2B",
+        "EOS-04_SAR-CRS_L2B",
+    ],
+    "ResourceSat-2": [
+        "ResourceSat-2_AWIFS_L2",
+        "ResourceSat-2_LISS3_L2",
+        "ResourceSat-2_LISS4-MX70_L2",
+    ],
+    "ResourceSat-2A": [
+        "ResourceSat-2A_AWIFS_L2",
+        "ResourceSat-2A_LISS3_L2",
+        "ResourceSat-2A_LISS4-MX70_L2",
+    ],
+    "EOS-06": [
+        "EOS-06_OCM-LAC_L1C",
+        "EOS-06_OCM-GAC_L2C-AOD",
+        "EOS-06_OCM-GAC_L2C-CHL",
+        "EOS-06_SCAT_L1B",
+    ],
+    "Sentinel-1A": [
+        "Sentinel-1A_SAR-IW_GRD",
+        "Sentinel-1A_SAR-IW_SLC",
+    ],
+    "CartoSat-1": [
+        "CartoSat-1_PAN_CartoDEM_30m",
+    ],
+    "NISAR": [
+        "NISAR_SSAR_ROFF",
+        "NISAR_SSAR-Beta_GSLC",
+    ],
+}
+
+
+def get_satellite_collections(satellite_name: str) -> List[str]:
+    """
+    Returns all constituent STAC collection IDs belonging to a satellite platform.
+    Handles aliases like 'eos-04', 'eos04', 'rs2', 'resourcesat-2', 'all'.
+    """
+    if not satellite_name:
+        return []
+
+    clean = satellite_name.strip().upper()
+
+    if clean in ("ALL", "FLEET", "ISRO"):
+        all_cols = []
+        for cols in SATELLITE_COLLECTIONS.values():
+            for c in cols:
+                if c not in all_cols:
+                    all_cols.append(c)
+        return all_cols
+
+    # Direct match
+    for sat, cols in SATELLITE_COLLECTIONS.items():
+        if clean == sat.upper():
+            return list(cols)
+
+    # Normalized match
+    norm_input = re.sub(r"[^A-Z0-9]", "", clean)
+    for sat, cols in SATELLITE_COLLECTIONS.items():
+        norm_sat = re.sub(r"[^A-Z0-9]", "", sat.upper())
+        if norm_input == norm_sat:
+            return list(cols)
+
+    # Specific common aliases
+    alias_dict = {
+        "RS2": "ResourceSat-2",
+        "RESOURCESAT2": "ResourceSat-2",
+        "RS2A": "ResourceSat-2A",
+        "RESOURCESAT2A": "ResourceSat-2A",
+        "EOS4": "EOS-04",
+        "EOS04": "EOS-04",
+        "RISAT1A": "EOS-04",
+        "EOS6": "EOS-06",
+        "EOS06": "EOS-06",
+        "OCEANSAT3": "EOS-06",
+        "SENTINEL1": "Sentinel-1A",
+        "S1A": "Sentinel-1A",
+        "CARTOSAT": "CartoSat-1",
+    }
+    if norm_input in alias_dict:
+        return list(SATELLITE_COLLECTIONS[alias_dict[norm_input]])
+
+    return []
+
