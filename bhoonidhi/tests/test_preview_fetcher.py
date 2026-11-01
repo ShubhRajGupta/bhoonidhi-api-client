@@ -224,6 +224,47 @@ class TestPreviewFetcher(unittest.TestCase):
         self.assertTrue((target_path / "manifest.json").exists())
         self.assertTrue((target_path / "previews" / "ITEM_DUP.jpg").exists())
 
+    def test_fetch_day_by_upload(self):
+        feat = {
+            "id": "ITEM_UPLOAD_1",
+            "collection": "UPLOAD_COLL",
+            "properties": {"datetime": "2026-10-28T10:00:00Z", "updated": "2026-10-29 14:00:00"},
+            "assets": {
+                "thumbnail": {"href": "https://bhoonidhi.nrsc.gov.in/stac/PRODUCTJPGS/thumb.jpg", "type": "image/jpeg"}
+            },
+        }
+
+        self.mock_client.search.return_value = STACSearchResult(
+            features=[feat],
+            total_returned=1,
+            pages_retrieved=1,
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Length": str(len(self.sample_jpeg))}
+        mock_resp.iter_content.return_value = [self.sample_jpeg]
+        self.mock_client.session.get.return_value = mock_resp
+
+        manifest = self.fetcher.fetch_day(
+            collection_id="UPLOAD_COLL",
+            target_date="2026-10-29",
+            output_base_dir=self.output_dir,
+            query_by="upload",
+        )
+
+        self.assertEqual(manifest["total_items_found"], 1)
+        self.assertEqual(manifest["previews_downloaded"], 1)
+        self.assertEqual(manifest["query_by"], "upload")
+        self.assertEqual(manifest["upload_date_prefix"], "2026-10-29")
+
+        # Verify client.search was called with extra_filter for updated property
+        self.mock_client.search.assert_called_once()
+        _, kwargs = self.mock_client.search.call_args
+        self.assertIn("extra_filter", kwargs)
+        self.assertEqual(kwargs["extra_filter"], {"op": "like", "args": [{"property": "updated"}, "2026-10-29%"]})
+
 
 if __name__ == "__main__":
     unittest.main()

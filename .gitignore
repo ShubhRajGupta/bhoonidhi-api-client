@@ -7,7 +7,9 @@ tokens.json
 # Local downloads and data artifacts
 downloads/
 data/
+reports/
 *.part
+*.pptx
 
 # Antigravity agent skills and skillpacks (Excluded from public repo)
 .agents/

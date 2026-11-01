@@ -369,10 +369,13 @@ class PreviewFetcher:
         output_base_dir: Union[str, Path] = "data",
         limit_per_page: int = 100,
         max_pages: int = 50,
+        query_by: str = "acquisition",
     ) -> Dict[str, Any]:
         """
         Main execution flow:
-        1. Queries STAC search for target_date (Asia/Kolkata day).
+        1. Queries STAC search for target_date.
+           - If query_by == 'acquisition': filters by sensing datetime in Asia/Kolkata day window.
+           - If query_by == 'upload': filters by STAC catalogue upload date ('updated' property).
         2. Deduplicates items.
         3. Downloads preview images to data/YYYY-MM-DD/<collection_id>/previews/.
         4. Writes metadata.json, metadata.csv, and manifest.json.
@@ -383,20 +386,34 @@ class PreviewFetcher:
         previews_dir = target_dir / "previews"
         previews_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(
-            "Fetching %s for date %s (IST window: %s)",
-            collection_id,
-            target_date,
-            dt_interval,
-        )
-
-        search_result = self.client.search(
-            collections=[collection_id],
-            datetime_range=dt_interval,
-            limit=limit_per_page,
-            online_only=False,
-            max_pages=max_pages,
-        )
+        if query_by == "upload":
+            logger.info(
+                "Fetching %s for upload date %s",
+                collection_id,
+                target_date,
+            )
+            extra_filter = {"op": "like", "args": [{"property": "updated"}, f"{target_date}%"]}
+            search_result = self.client.search(
+                collections=[collection_id],
+                extra_filter=extra_filter,
+                limit=limit_per_page,
+                online_only=False,
+                max_pages=max_pages,
+            )
+        else:
+            logger.info(
+                "Fetching %s for date %s (IST window: %s)",
+                collection_id,
+                target_date,
+                dt_interval,
+            )
+            search_result = self.client.search(
+                collections=[collection_id],
+                datetime_range=dt_interval,
+                limit=limit_per_page,
+                online_only=False,
+                max_pages=max_pages,
+            )
 
         # Deduplicate features by item ID
         unique_features: List[Dict[str, Any]] = []
@@ -479,9 +496,11 @@ class PreviewFetcher:
         manifest = {
             "target_date": target_date,
             "collection_id": collection_id,
+            "query_by": query_by,
             "timezone": "Asia/Kolkata (UTC+05:30)",
-            "utc_window_start": start_utc,
-            "utc_window_end": end_utc,
+            "utc_window_start": start_utc if query_by == "acquisition" else None,
+            "utc_window_end": end_utc if query_by == "acquisition" else None,
+            "upload_date_prefix": target_date if query_by == "upload" else None,
             "total_items_found": len(unique_features),
             "previews_downloaded": downloaded_count,
             "previews_already_existing": already_exists_count,
